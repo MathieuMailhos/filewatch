@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/types.h>
 #include <linux/limits.h>
 #include <string.h>
 
@@ -16,6 +18,7 @@ int  main(int argc, char*argv[]) {
     struct stat sb;
     char eventbuf[BUFSIZE];  /* Events are read into here */
     char *event_iter;
+    pid_t child;
     struct inotify_event *event;
 
     /* NAME_MAX is defined in linux/limits.h 
@@ -31,7 +34,7 @@ int  main(int argc, char*argv[]) {
     notifyd = inotify_init(); //Not checked for error
 
     if (notifyd == -1) {
-        perror(argv[0]);
+        perror("inotify_init");
         exit(EXIT_FAILURE);
     }
 
@@ -65,7 +68,21 @@ int  main(int argc, char*argv[]) {
             /* All the events are not of fixed length */
             event_iter += sizeof(struct inotify_event) + event->len;
             if (event->mask & IN_MODIFY) {
-                printf("%s was modified\n", watchednames[event->wd]);
+		child = fork();
+		if (child == -1) {
+			perror("fork");
+			continue;
+		}
+                if (child) {
+		    printf("[%i] %s was modified.\n", child, watchednames[event->wd]);
+                    wait(0);
+                } else {
+		    /* {"ls", "-a", 0} */
+                    //execvp(argv[argc - 1], argv[argc - 1]);
+                    execlp(argv[argc - 1], argv[argc - 1], (char *)0);
+                    fprintf(stderr, "%s: not found\n", argv[argc - 1]);
+                    exit(EXIT_FAILURE);
+                }
             }
         }
     }
