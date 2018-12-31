@@ -12,38 +12,22 @@
 /* A buffer big enough to read 100 events in one go */
 #define BUFSIZE (100 * (sizeof(struct inotify_event) + NAME_MAX + 1))
 
-int  main(int argc, char*argv[]) {
+int register_files(int filecount, char *files[]);
+
+int register_files(int filecount, char *files[]) {
     int notifyd, watchfd;
-    int n;
     struct stat sb;
     char eventbuf[BUFSIZE];  /* Events are read into here */
     char *event_iter;
-    pid_t child;
-    struct inotify_event *event;
 
-    /* NAME_MAX is defined in linux/limits.h 
-     * The uniform system limit (if any) for the length of a file name component, not including the terminating null character.
-     */
-    char watchednames[100][NAME_MAX+1];
-
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s [files ...] [command]\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    notifyd = inotify_init(); //Not checked for error
+    notifyd = inotify_init();
 
     if (notifyd == -1) {
         perror("inotify_init");
         exit(EXIT_FAILURE);
     }
 
-//    if (stat(argv[argc - 1], &sb) < 0 || sb.st_mode | S_IXUSR) {
-//        fprintf(stderr, "Program '%s' not found or not executable\n", argv[argc - 1]);
-//        exit(EXIT_FAILURE);
-//    }
-
-    for(int i = 1; i < argc - 1; i++) {
+    for(int i = 1; i < filecount; i++) {
         if (stat(argv[i], &sb) < 0) {
             fprintf(stderr, "Can not stat %s, ignored\n", argv[i]);
             continue;
@@ -57,6 +41,27 @@ int  main(int argc, char*argv[]) {
                 printf("Added %s to watch list on descriptor %d\n", argv[i], watchfd);
             }
         }
+    }
+    return notifyd;
+}
+
+int  main(int argc, char*argv[]) {
+    int notifyd;
+    int n;
+    pid_t child;
+    struct inotify_event *event;
+
+    //try to remove first element from argv
+    notifyd = register_files(argc - 1, argv);
+
+    /* NAME_MAX is defined in linux/limits.h 
+     * The uniform system limit (if any) for the length of a file name component, not including the terminating null character.
+     */
+    char watchednames[100][NAME_MAX+1];
+
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s [files ...] [command]\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
     /* Start watching for modified files */
@@ -77,14 +82,22 @@ int  main(int argc, char*argv[]) {
 		    printf("[%i] %s was modified.\n", child, watchednames[event->wd]);
                     wait(0);
                 } else {
-		    /* {"ls", "-a", 0} */
-                    //execvp(argv[argc - 1], argv[argc - 1]);
-                    execlp(argv[argc - 1], argv[argc - 1], (char *)0);
-                    fprintf(stderr, "%s: not found\n", argv[argc - 1]);
+		    char *args[64];
+  		    char **next = args;
+		    char *temp = strtok(argv[argc-1], " \t\n");
+		    int n;
+		    while (temp != NULL) {
+			*next++ = temp;
+			printf("%s\n", temp);
+			temp = strtok(NULL, " \t\n");
+		    }
+		    execvp(args[0], args);
+		    perror(args[0]);
                     exit(EXIT_FAILURE);
                 }
             }
         }
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
+
