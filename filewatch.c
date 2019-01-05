@@ -72,7 +72,7 @@ void kill_children() {
 }
 
 
-int register_files(int filecount, char *files[], char *watchednames[]) {
+int register_files(int argc, char *argv[], char *watchednames[]) {
     int notifyd, watchfd;
     struct stat sb;
 
@@ -82,40 +82,21 @@ int register_files(int filecount, char *files[], char *watchednames[]) {
         perror("inotify_init");
         exit(EXIT_FAILURE);
     }
-    while (filecount--) {
-        if (stat(*files, &sb) < 0) {
-            fprintf(stderr, "Can not stat %s, ignored\n", *files);
+    while (argc--) {
+        if (stat(*argv, &sb) < 0) {
+            fprintf(stderr, "Can not stat %s, ignored\n", *argv);
             continue;
         }
         /* Regular file, so add to watch list */
         if (S_ISREG(sb.st_mode)) {
-            if ((watchfd = inotify_add_watch(notifyd, *files, IN_MODIFY)) < 0) {
-                fprintf(stderr, "Error adding watch for %s\n", *files);
-            } else {
-                strcpy(watchednames[watchfd], *files);
-                printf("Added %s to watch list on descriptor %d\n", *files, watchfd);
-            }
+            if ((watchfd = inotify_add_watch(notifyd, *argv, IN_MODIFY)) < 0) {
+                fprintf(stderr, "Error adding watch for %s\n", *argv);
+            } else
+                strcpy(watchednames[watchfd], *argv);
         }
-        files++;
+        argv++;
     }
     return notifyd;
-
-//    for(int i = 1; i < filecount; i++) {
-//        if (stat(files[i], &sb) < 0) {
-//            fprintf(stderr, "Can not stat %s, ignored\n", files[i]);
-//            continue;
-//        }
-//        /* Regular file, so add to watch list */
-//        if (S_ISREG(sb.st_mode)) {
-//            if ((watchfd = inotify_add_watch(notifyd, files[i], IN_MODIFY)) < 0) {
-//                fprintf(stderr, "Error adding watch for %s\n", files[i]);
-//            } else {
-//                strcpy(watchednames[watchfd], files[i]);
-//                printf("Added %s to watch list on descriptor %d\n", files[i], watchfd);
-//            }
-//        }
-//    }
-//    return notifyd;
 }
 
 void parse_command(char* command, char **args) {
@@ -159,7 +140,7 @@ void file_modified(char *args[], char *filename, int mode) {
 
     if (child) {
         add_pid(child);
-	    printf("[%i] %s was modified.\n", child, filename);
+	    printf("[%i] %s has been modified.\n", child, filename);
         if (mode == MODE_QUEUE) {
             wait(0);
         } else if (mode == MODE_OVERRIDE) {
@@ -234,25 +215,22 @@ static int register_term_signals() {
 }
 
 int get_mode(int argc, char*argv[]) {
-    /* Delete this to see getopt own's error message */
     int c;
+
+    /* Delete this to see getopt own's error message */
     opterr = 0;
      while ( (c = getopt(argc, argv, "m:")) != EOF) {
         switch (c) {
         case 'm':
-            printf("found m\n");
-            if (strncmp(optarg, "q", 1) == 0 || strncmp(optarg, "queue", 5) == 0) {
+            if (strncmp(optarg, "q", 1) == 0 || strncmp(optarg, "queue", 5) == 0)
                 return MODE_QUEUE;
-                printf("mode queue\n");
-            } else if (strncmp(optarg, "c", 1) == 0 || strncmp(optarg, "concurrent", 10) == 0) {
-                printf("mode concurrent\n");
+            else if (strncmp(optarg, "c", 1) == 0 || strncmp(optarg, "concurrent", 10) == 0)
                 return MODE_CONCURRENT;
-            } else if (strncmp(optarg, "o", 1) == 0 || strncmp(optarg, "override", 8) == 0) {
-                printf("mode override\n");
+            else if (strncmp(optarg, "o", 1) == 0 || strncmp(optarg, "override", 8) == 0)
                 return MODE_OVERRIDE;
-            } else {
+            else {
                 fprintf(stderr, "invalid value: %s. Choose one of [concurrent(c), queue(q), override(o)].\n", optarg);
-                return -1;
+                exit(EXIT_FAILURE);
             }
             break;
         case '?':
@@ -260,10 +238,15 @@ int get_mode(int argc, char*argv[]) {
             return -1;
         }
     }
-     return 0;
+     return MODE_QUEUE;
 }
 
+
+void filewatch(int notifyd, int exec_mode, char *args[64]) {
+
+}
 int  main(int argc, char*argv[]) {
+
     int notifyd;
     int n;
     struct inotify_event *event;
@@ -271,19 +254,17 @@ int  main(int argc, char*argv[]) {
     char *event_iter;
     char *args[64];
     int mode;
-    
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s [files ...] [command]\n", argv[0]);
-        return EXIT_FAILURE;
-    }
+
     mode = get_mode(argc, argv);
     if (mode == -1)
         return EXIT_FAILURE;
-    if (mode == 0) {
-        mode = MODE_QUEUE;
-    }
     argv += optind;
     argc -= optind;
+
+    if (argc < 2) {
+        fprintf(stderr, "Usage: filewatch [-m OPT] [files ...] [command]\n");
+        return EXIT_FAILURE;
+    }
 
     watchednames = (char**)malloc(sizeof(char *) * MAX_EVENTS);
     for (int i = 0; i < MAX_EVENTS; i++)
@@ -292,13 +273,10 @@ int  main(int argc, char*argv[]) {
     if (register_term_signals() || sigchld_signal()) {
         perror("signal");
         return EXIT_FAILURE;
-
     }
 
     notifyd = register_files(argc - 1, argv, watchednames);
-
     parse_command(argv[argc -1], args);
-
 
     /* Start watching for modified files */
     while(1) {
@@ -308,7 +286,7 @@ int  main(int argc, char*argv[]) {
             event = (struct inotify_event *) event_iter;
             /* All the events are not of fixed length */
             event_iter += sizeof(struct inotify_event) + event->len;
-            if (event->mask & IN_MODIFY) 
+            if (event->mask & IN_MODIFY)
                 file_modified(args, watchednames[event->wd], mode);
         }
     }
