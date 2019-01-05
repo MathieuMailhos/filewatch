@@ -14,20 +14,19 @@
 #include <time.h>
 
 
-/* A buffer big enough to read 100 events in one go */
-#define MAX_EVENTS 100
+#define MAX_EVENTS 4096
 /* NAME_MAX is defined in linux/limits.h */
 #define MAX_NAME_SIZE (NAME_MAX + 1)
+/* A buffer big enough to read 100 inotify events in one go */
 #define BUFSIZE (MAX_EVENTS * (sizeof(struct inotify_event) + MAX_NAME_SIZE))
 
 /* Process execution mode.
- * value 0 is reserved for mode not set
  * QUEUE: commands are executed one after the other
  * CONCURRENT: commands are executed in parallel
  * OVERRIDE: last command takes over */
-#define MODE_QUEUE 1
-#define MODE_CONCURRENT 2
-#define MODE_OVERRIDE 3
+#define MODE_QUEUE 0
+#define MODE_CONCURRENT 1
+#define MODE_OVERRIDE 2
 
 /* Macro to avoid unused warnign from gcc */
 #define UNUSED(x) (void)(x)
@@ -71,16 +70,16 @@ void kill_children() {
             kill(children[i], SIGTERM);
 }
 
-
 int register_files(int argc, char *argv[], char *watchednames[]) {
     int notifyd, watchfd;
     struct stat sb;
+    int count_filewatch = 0;
 
     notifyd = inotify_init();
 
     if (notifyd == -1) {
         perror("inotify_init");
-        exit(EXIT_FAILURE);
+        return -1;
     }
     while (argc--) {
         if (stat(*argv, &sb) < 0) {
@@ -91,10 +90,16 @@ int register_files(int argc, char *argv[], char *watchednames[]) {
         if (S_ISREG(sb.st_mode)) {
             if ((watchfd = inotify_add_watch(notifyd, *argv, IN_MODIFY)) < 0) {
                 fprintf(stderr, "Error adding watch for %s\n", *argv);
-            } else
+            } else {
                 strcpy(watchednames[watchfd], *argv);
+                count_filewatch++;
+            }
         }
         argv++;
+    }
+    if (count_filewatch == 0) {
+        fprintf(stderr, "No files are being watched.\n");
+        return -1;
     }
     return notifyd;
 }
@@ -117,21 +122,6 @@ void file_modified(char *args[], char *filename, int mode) {
         return;
     }
 
-
-    /* TO DO CLEAN UP AFTER TESTS */
-        srand(time(NULL));
-        int randomnumber;
-        randomnumber = rand() % 10;
-        char snum[10];
-        sprintf(snum,"%d",randomnumber);
-        printf("%s\n", snum);
-        char *argv[3];
-        char *cmd = "sleep";
-        argv[0] = "sleep";
-        argv[1] = snum;
-        argv[2] = NULL;
-        printf("%s\n", *argv);
-        fflush(stdout);
     child = fork();
     if (child == -1) {
     	perror("fork");
@@ -147,8 +137,7 @@ void file_modified(char *args[], char *filename, int mode) {
             kill_children();
         }
     } else {
-	    //execvp(args[0], args);
-        execvp(cmd, argv); //This will run "ls -la" as if it were a command
+	    execvp(args[0], args);
 	    perror(args[0]);
 	    exit(EXIT_FAILURE);
     }
@@ -193,14 +182,14 @@ static int register_term_signals() {
 
     /* Avoid undefined behavior and mysterious crashes */
     memset(&action, 0, sizeof action);
-    /* List of most common terminal signals from `man 7 signal`. */
+    /* List of most common termination signals from `man 7 signal`. */
     int term_signals[] = { SIGHUP, SIGINT, SIGPIPE, SIGALRM, SIGTERM, SIGUSR1, SIGUSR2 };
     int term_signals_count = sizeof(term_signals)/sizeof(term_signals[0]);
 
     action.sa_handler = term_handler;
     sigemptyset(&action.sa_mask);
 
-    /* Block most common termination signals to avoid breaking cleanup*/
+    /* Block most common termination signals to avoid breaking cleanup */
     sigemptyset(&action.sa_mask);
     for (int i = 0; i < term_signals_count; i++)
         sigaddset(&action.sa_mask, term_signals[i]);
@@ -229,12 +218,12 @@ int get_mode(int argc, char*argv[]) {
             else if (strncmp(optarg, "o", 1) == 0 || strncmp(optarg, "override", 8) == 0)
                 return MODE_OVERRIDE;
             else {
-                fprintf(stderr, "invalid value: %s. Choose one of [concurrent(c), queue(q), override(o)].\n", optarg);
-                exit(EXIT_FAILURE);
+                fprintf(stderr, "Invalid value: %s. Choose one of [concurrent(c), queue(q), override(o)].\n", optarg);
+                return -1;
             }
             break;
         case '?':
-            fprintf(stderr, "invalid option: -%c\n", optopt);
+            fprintf(stderr, "Invalid option: -%c\n", optopt);
             return -1;
         }
     }
@@ -242,16 +231,29 @@ int get_mode(int argc, char*argv[]) {
 }
 
 
-void filewatch(int notifyd, int exec_mode, char *args[64]) {
-
-}
-int  main(int argc, char*argv[]) {
-
-    int notifyd;
+int filewatch(int notifyd, char *args[64], int exec_mode) {
     int n;
     struct inotify_event *event;
     char eventbuf[BUFSIZE];  /* Events are read into here */
     char *event_iter;
+
+    /* Start watching for modified files */
+    while(1) {
+        /* Read inotify events from notifyd file descriptor, into eventbuf */
+        n = read(notifyd, eventbuf, BUFSIZE);
+        for(event_iter = eventbuf; event_iter < eventbuf + n;) {
+            event = (struct inotify_event *) event_iter;
+            /* All the events are not of fixed length */
+            event_iter += sizeof(struct inotify_event) + event->len;
+            if (event->mask & IN_MODIFY)
+                file_modified(args, watchednames[event->wd], exec_mode);
+        }
+    }
+    return EXIT_SUCCESS;
+}
+
+int  main(int argc, char*argv[]) {
+    int notifyd;
     char *args[64];
     int mode;
 
@@ -266,29 +268,20 @@ int  main(int argc, char*argv[]) {
         return EXIT_FAILURE;
     }
 
-    watchednames = (char**)malloc(sizeof(char *) * MAX_EVENTS);
-    for (int i = 0; i < MAX_EVENTS; i++)
-        watchednames[i] = (char *)malloc(MAX_NAME_SIZE);
-
     if (register_term_signals() || sigchld_signal()) {
         perror("signal");
         return EXIT_FAILURE;
     }
 
-    notifyd = register_files(argc - 1, argv, watchednames);
-    parse_command(argv[argc -1], args);
+    watchednames = (char**)malloc(sizeof(char *) * MAX_EVENTS);
+    for (int i = 0; i < MAX_EVENTS; i++)
+        watchednames[i] = (char *)malloc(MAX_NAME_SIZE);
 
-    /* Start watching for modified files */
-    while(1) {
-        /* Read inotify events from notifyd file descriptor, into eventbuf */
-        n = read(notifyd, eventbuf, BUFSIZE);
-        for(event_iter = eventbuf; event_iter < eventbuf + n;) {
-            event = (struct inotify_event *) event_iter;
-            /* All the events are not of fixed length */
-            event_iter += sizeof(struct inotify_event) + event->len;
-            if (event->mask & IN_MODIFY)
-                file_modified(args, watchednames[event->wd], mode);
-        }
+    notifyd = register_files(argc - 1, argv, watchednames);
+    if (notifyd == -1) {
+        term_handler();
+        return EXIT_FAILURE;
     }
-    return EXIT_SUCCESS;
+    parse_command(argv[argc - 1], args);
+    return filewatch(notifyd, args, mode);
 }
