@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <linux/limits.h>
+#include <poll.h>
 #include <string.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -14,7 +15,7 @@
 #include <time.h>
 
 
-#define MAX_EVENTS 4096
+#define MAX_EVENTS 8192
 /* NAME_MAX is defined in linux/limits.h */
 #define MAX_NAME_SIZE (NAME_MAX + 1)
 /* A buffer big enough to read 100 inotify events in one go */
@@ -38,6 +39,8 @@ pid_t children[MAX_PROCS];
 /* Array of filenames watched by the program. Accessible from signal */
 char **watchednames;
 
+/* Signal Events fd */
+int sig_fd[2];
 
 /* Look for first available place in a non-sorted int array.
  * Lack of optimisation here. */
@@ -145,16 +148,18 @@ void file_modified(char *args[], char *filename, int mode) {
 
 static void term_handler() {
     /* Freeing up memory allocation */
-    if (watchednames != NULL) {
-        for (int i = 0; i < MAX_EVENTS; i++) {
-            if (watchednames[i] != NULL)
-                free(watchednames[i]);
-        }
-        free(watchednames);
-    }
+    ///if (watchednames != NULL) {
+    ///    for (int i = 0; i < MAX_EVENTS; i++) {
+    ///        if (watchednames[i] != NULL)
+    ///            free(watchednames[i]);
+    ///    }
+    ///    free(watchednames);
+    ///}
     /* Option 2: wait for all childs to finish: while (wait(0) > 0); */
-    kill_children();
-    exit(EXIT_SUCCESS);
+//    kill_children();
+    printf("Received signal!\n");
+    write(sig_fd[1], "1", 1);
+//    exit(EXIT_SUCCESS);
 }
 
 static void sigchld(int signum, siginfo_t *info, void *context) {
@@ -233,20 +238,48 @@ int get_mode(int argc, char*argv[]) {
 
 int filewatch(int notifyd, char *args[64], int exec_mode) {
     int n;
+    int rv;
     struct inotify_event *event;
     char eventbuf[BUFSIZE];  /* Events are read into here */
     char *event_iter;
+    struct pollfd fds[2];
 
+    fds[0].fd = sig_fd[0];
+    fds[0].events = POLLIN;
+    fds[1].fd = notifyd;
+    fds[1].fd = POLLIN;
     /* Start watching for modified files */
     while(1) {
-        /* Read inotify events from notifyd file descriptor, into eventbuf */
-        n = read(notifyd, eventbuf, BUFSIZE);
-        for(event_iter = eventbuf; event_iter < eventbuf + n;) {
-            event = (struct inotify_event *) event_iter;
-            /* All the events are not of fixed length */
-            event_iter += sizeof(struct inotify_event) + event->len;
-            if (event->mask & IN_MODIFY)
-                file_modified(args, watchednames[event->wd], exec_mode);
+        if ((rv = poll(fds, 2, -1)) == -1) {
+            perror("poll");
+            continue;
+        }
+        if (fds[0].revents & POLLIN) {
+          if (watchednames != NULL) {
+              for (int i = 0; i < MAX_EVENTS; i++) {
+                  if (watchednames[i] != NULL)
+                      free(watchednames[i]);
+              }
+              free(watchednames);
+          }
+          kill_children();
+          printf("Exit");
+          return EXIT_SUCCESS;
+        }
+        if (fds[1].revents & POLLIN) {
+          /* Read inotify events from notifyd file descriptor, into eventbuf */
+          n = read(notifyd, eventbuf, BUFSIZE);
+          if (n == -1) {
+            perror("read");
+            continue;
+          }
+          for(event_iter = eventbuf; event_iter < eventbuf + n;) {
+              event = (struct inotify_event *) event_iter;
+              /* All the events are not of fixed length */
+              event_iter += sizeof(struct inotify_event) + event->len;
+              if (event->mask & IN_MODIFY)
+                  file_modified(args, watchednames[event->wd], exec_mode);
+          }
         }
     }
     return EXIT_SUCCESS;
@@ -268,8 +301,13 @@ int  main(int argc, char*argv[]) {
         return EXIT_FAILURE;
     }
 
-    if (register_term_signals() || sigchld_signal()) {
+    if (register_term_signals(sig_fd[1]) || sigchld_signal()) {
         perror("signal");
+        return EXIT_FAILURE;
+    }
+
+    if (pipe(sig_fd) == -1) {
+        perror("pipe");
         return EXIT_FAILURE;
     }
 
